@@ -41,68 +41,68 @@ func (n *Node) login(c net.Conn) (p *proxy.Proxy, ok bool) {
 	for {
 		//发送标识"  v1"
 		if _, err := c.Write([]byte("  v1")); err != nil {
-			fmt.Println("proxy write failed")
+			fmt.Printf("登录失败(read)，稍后重试\n")
 			break
 		}
 		//读取"hello"
 		if n, err := c.Read(data); err != nil || n < 5 || bytes.Equal(data, []byte("hello")) {
-			fmt.Println("can not get welcome replay")
+			fmt.Printf("登录失败(hello)，稍后重试\n")
 			break
 		}
 		//生成rsa2048密钥并上传公钥
 		rsakey, err := rsa.GenerateKey(rand.Reader, 2048)
 		if err != nil {
-			fmt.Println("generate rsa private key failed:", err)
+			fmt.Printf("登录失败(generate private rsa)，稍后重试\n")
 			break
 		}
 		pubStr := x509.MarshalPKCS1PublicKey(&rsakey.PublicKey)
 		if n, err := c.Write(pubStr); err != nil || n <= 0 {
-			fmt.Println("proxy send public key failed")
+			fmt.Printf("登录失败(generate public key)，稍后重试\n")
 			break
 		}
 		//读取服务器公钥
 		if n, err := c.Read(data); err != nil || n <= 0 {
-			fmt.Println("proxy read server key failed")
+			fmt.Printf("登录失败(read)，稍后重试\n")
 			break
 		} else {
 			rsaPub, err := x509.ParsePKCS1PublicKey(data[0:n])
 			if err != nil || rsaPub == nil {
-				fmt.Println("rsa server key parse failed")
+				fmt.Printf("登录失败(parse public key)，稍后重试\n")
 				break
 			}
 			//加密uuid并上传，服务端使用uuid识别用户身份
-			msg, err := rsa.EncryptPKCS1v15(rand.Reader, rsaPub, []byte("12345678901234567890123456789012"))
+			msg, err := rsa.EncryptPKCS1v15(rand.Reader, rsaPub, []byte(*UUID))
 			if err != nil {
-				fmt.Println("rsa pub encrypt failed")
+				fmt.Printf("登录失败(public key encrypt)，稍后重试\n")
+				break
 			}
 			if n, err := c.Write(msg); err != nil || n <= 0 {
-				fmt.Println("proxy read failed 5")
+				fmt.Printf("登录失败(write)，稍后重试\n")
 				break
 			}
 		}
 		var blk cipher.Block = nil
 		//读取回应的aes密钥(前16字节为随机字符，后16字节为aes密钥)
 		if n, err := c.Read(data); err != nil || n < 32 {
-			fmt.Println("proxy read failed, n:", n)
+			fmt.Printf("登录失败(read)，稍后重试\n")
 			break
 		} else {
 			//使用公钥解密aes密钥
 			aesKey, err := rsa.DecryptPKCS1v15(rand.Reader, rsakey, data[0:n])
 			if err != nil {
-				fmt.Println("rsa decrypt failed:", err)
+				fmt.Printf("登录失败(private key decrypt)，稍后重试\n")
 				break
 			}
 			//使用aes密钥加密前16字节以确认登录交互完成
 			aesBlk, err := aes.NewCipher(aesKey[16:32])
 			if err != nil {
-				fmt.Println("create aes block failed:", err)
 				break
 			}
 			blk = aesBlk
 			//使用aes加密前16字节随机确认字符
 			blk.Encrypt(data[0:16], aesKey[0:16])
 			if n, err := c.Write(data[0:16]); err != nil || n != 16 {
-				fmt.Println("proxy write failed")
+				fmt.Printf("登录失败(write)，稍后重试\n")
 				break
 			}
 		}
@@ -126,22 +126,24 @@ func (n *Node) newConnect() {
 	for {
 		s := strings.Split(n.addr.Addr, ":")
 		if len(s) != 2 {
-			panic("error address:%" + n.addr.Addr + "\n")
+			fmt.Printf("地址错误(%s)，稍后重试\n", n.addr.Addr)
+			break
 		}
 		ips, err := net.LookupHost(s[0])
 		if err != nil {
-			panic("unknow host:" + s[0] + "\n")
+			fmt.Printf("未知主机(%s)，稍后重试\n", n.addr.Addr)
 		}
 		c, err := net.Dial(n.addr.Domain, ips[0]+":"+s[1])
 		if err == nil {
 			n.c = c
 			//首先完成登录
 			if p, ok := n.login(c); ok == true {
+				fmt.Printf("连接成功\n")
 				go p.Handle()
 				break
 			}
 		}
-		fmt.Println("tcp connect failed:", err)
+		fmt.Printf("连接失败(%s)，稍后重试\n", n.addr.Addr)
 		time.Sleep(1 * time.Second)
 	}
 }

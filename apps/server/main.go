@@ -14,16 +14,19 @@ func (i *arg_list) Set(value string) error {
 	*i = append(*i, value)
 	return nil
 }
+
+var UUID *string
 func main() {
-	host := flag.String("host", "127.0.0.1", "listen host ip")
-	port := flag.Int("port", 925, "listen port")
 	var listeners arg_list
 	var peerListeners arg_list
-	flag.Var(&listeners, "listener", "listen&forward address list")
-	flag.Var(&peerListeners, "peer_listener", "peer listen&forward address list")
+	host := flag.String("host", "0.0.0.0", "listen host ip代理服务监听地址")
+	port := flag.Int("port", 925, "listen port代理服务监听端口")
+	UUID  = flag.String("uuid", "idste", "UUID")
+	flag.Var(&listeners, "listener", "listen&forward address list代理端监听转发地址，可多次传入该参数")
+	flag.Var(&peerListeners, "peer_listener", "peer listen&forward address list内网代理转发地址，可多次传入该参数")
 	flag.Parse()
 	if *port > 40000 || *port <= 0 {
-		panic("port can be 1 - 40000")
+		panic("端口错误，1-40000")
 	}
 	NewServer(*host, strconv.Itoa(*port), listeners, peerListeners)
 	select {}
