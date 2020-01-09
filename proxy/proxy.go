@@ -59,7 +59,7 @@ type Proxy struct {
 //NewProxy创建新的代理对象
 //在调用本函数前，需要完成服务端和客户端连接并完成认证和aes128密钥协商
 func NewProxy(id uint32, c net.Conn, ctx interface{}, aesBlock cipher.Block, bp *BufferPool, exit callback) *Proxy {
-	if bp == nil {
+	if bp == nil || aesBlock == nil || c == nil {
 		panic("buffer pool can not be nil")
 	}
 	p := &Proxy{ID: id, idx: 1, aesBlock: aesBlock, c: c, bp: bp, exitCB: exit, Ctx: ctx}
@@ -202,7 +202,9 @@ func (p *Proxy) NewListener(msg []byte) {
 			for {
 				c, err := lsn.l.Accept()
 				if err != nil {
-					fmt.Printf("accept tcp connection failed, error:%s\n", err.Error())
+					if (lsn.active) {
+						fmt.Printf("accept tcp connection failed, error:%s\n", err.Error())
+					}
 					break
 				}
 				if c != nil {
@@ -514,13 +516,13 @@ func (p *Proxy) write() {
 	}
 err:
 	p.c.Close()
+	p.mutex.Lock()
 	for _, lsn := range p.listeners {
 		if lsn.l != nil {
 			lsn.active = false
 			_ = lsn.l.Close()
 		}
 	}
-	p.mutex.RLock()
 	for _, cli := range p.clients {
 		select {
 		case cli.ctrlChan <- CTRL_CMD_FORCE_EXIT:
@@ -533,7 +535,7 @@ err:
 		default:
 		}
 	}
-	p.mutex.RUnlock()
+	p.mutex.Unlock()
 	p.wg.Wait()
 	p.bp.appendList(p.freeBuffers)
 	finish := false

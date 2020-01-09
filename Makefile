@@ -9,7 +9,7 @@ ifeq (${GOOS},windows)
 endif
 
 APPS = server node
-all: $(APPS)
+all: clean $(APPS)
 
 $(BLDDIR)/%:%
 	@mkdir -p $(dir $@)

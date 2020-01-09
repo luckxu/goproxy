@@ -7,33 +7,27 @@ package main
 import (
 	"bytes"
 	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/x509"
+	"crypto/md5"
 	"fmt"
+	"github.com/idste/goproxy/proxy"
 	"net"
 	"strings"
-	"sync"
 	"time"
-	"github.com/idste/goproxy/proxy"
 )
 
 type Node struct {
 	active bool
-	id     uint32
-	mutex  sync.Mutex
 	c      net.Conn
-	proxys map[uint32]*proxy.Proxy
+	proxy  *proxy.Proxy
 	bp     *proxy.BufferPool
 	addr   proxy.Address
+	uuid	 string
+	password string
 }
 
 func nodeProxyExit(p *proxy.Proxy) {
 	n := p.Ctx.(*Node)
-	n.mutex.Lock()
-	defer n.mutex.Unlock()
-	delete(n.proxys, p.ID)
+	n.proxy = nil
 	if n.active {
 		go n.newConnect()
 	}
@@ -45,82 +39,36 @@ func (n *Node) login(c net.Conn) (p *proxy.Proxy, ok bool) {
 	for {
 		//发送标识"  v1"
 		if _, err := c.Write([]byte("  v1")); err != nil {
-			fmt.Printf("登录失败(read)，稍后重试\n")
 			break
 		}
-		//读取"hello"
-		if n, err := c.Read(data); err != nil || n < 5 || bytes.Equal(data, []byte("hello")) {
-			fmt.Printf("登录失败(hello)，稍后重试\n")
+		//读取hello
+		if n, err := c.Read(data); err != nil || n != 5 || bytes.Equal(data, []byte("hello")){
 			break
 		}
-		//生成rsa2048密钥并上传公钥
-		rsakey, err := rsa.GenerateKey(rand.Reader, 2048)
+
+		//发送uuid
+		if _, err := c.Write([]byte(n.uuid)); err != nil {
+			break
+		}
+
+		//读取16字节随机数
+		if n, err := c.Read(data); err != nil || n != 16 {
+			break
+		}
+		copy(data[16:], n.password)
+		size := 16 + len(n.password)
+		md5sum := md5.Sum(data[:size])
+		blk, err := aes.NewCipher(md5sum[0:16])
 		if err != nil {
-			fmt.Printf("登录失败(generate private rsa)，稍后重试\n")
 			break
 		}
-		pubStr := x509.MarshalPKCS1PublicKey(&rsakey.PublicKey)
-		if n, err := c.Write(pubStr); err != nil || n <= 0 {
-			fmt.Printf("登录失败(generate public key)，稍后重试\n")
+		blk.Encrypt(data[0:16], data[0:16])
+		//发送aes encrypt data[0:16]
+		if _, err := c.Write(data[0:16]); err != nil {
 			break
 		}
-		//读取服务器公钥
-		if n, err := c.Read(data); err != nil || n <= 0 {
-			fmt.Printf("登录失败(read)，稍后重试\n")
-			break
-		} else {
-			rsaPub, err := x509.ParsePKCS1PublicKey(data[0:n])
-			if err != nil || rsaPub == nil {
-				fmt.Printf("登录失败(parse public key)，稍后重试\n")
-				break
-			}
-			//加密uuid并上传，服务端使用uuid识别用户身份
-			msg, err := rsa.EncryptPKCS1v15(rand.Reader, rsaPub, []byte(*UUID))
-			if err != nil {
-				fmt.Printf("登录失败(public key encrypt)，稍后重试\n")
-				break
-			}
-			if n, err := c.Write(msg); err != nil || n <= 0 {
-				fmt.Printf("登录失败(write)，稍后重试\n")
-				break
-			}
-		}
-		var blk cipher.Block = nil
-		//读取回应的aes密钥(前16字节为随机字符，后16字节为aes密钥)
-		if n, err := c.Read(data); err != nil || n < 32 {
-			fmt.Printf("登录失败(read)，稍后重试\n")
-			break
-		} else {
-			//使用公钥解密aes密钥
-			aesKey, err := rsa.DecryptPKCS1v15(rand.Reader, rsakey, data[0:n])
-			if err != nil {
-				fmt.Printf("登录失败(private key decrypt)，稍后重试\n")
-				break
-			}
-			//使用aes密钥加密前16字节以确认登录交互完成
-			aesBlk, err := aes.NewCipher(aesKey[16:32])
-			if err != nil {
-				break
-			}
-			blk = aesBlk
-			//使用aes加密前16字节随机确认字符
-			blk.Encrypt(data[0:16], aesKey[0:16])
-			if n, err := c.Write(data[0:16]); err != nil || n != 16 {
-				fmt.Printf("登录失败(write)，稍后重试\n")
-				break
-			}
-		}
-		n.mutex.Lock()
-		for {
-			if _, ok := n.proxys[n.id]; ok == true {
-				n.id++
-			} else {
-				break
-			}
-		}
-		p := proxy.NewProxy(n.id, c, n, blk, n.bp, nodeProxyExit)
-		n.proxys[n.id] = p
-		n.mutex.Unlock()
+		p := proxy.NewProxy(0, c, n, blk, n.bp, nodeProxyExit)
+		n.proxy = p
 		return p, true
 	}
 	return nil, false
@@ -147,14 +95,13 @@ func (n *Node) newConnect() {
 				break
 			}
 		}
-		fmt.Printf("连接失败(%s)，稍后重试\n", n.addr.Addr)
+		fmt.Printf("连接失败(%s)，稍后重试\n")
 		time.Sleep(1 * time.Second)
 	}
 }
 
-func NewNode(host string, port string) {
-	n := &Node{active: true, addr: proxy.Address{Domain: "tcp", Addr: host + ":" + port}}
-	n.proxys = make(map[uint32]*proxy.Proxy)
+func NewNode(addr string, uuid string, password string) {
+	n := &Node{active: true, uuid:uuid, password: password, addr: proxy.Address{Domain: "tcp", Addr: addr}}
 	n.bp = proxy.NewBufferPool(10240)
 	go n.newConnect()
 }

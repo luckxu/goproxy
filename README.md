@@ -44,6 +44,8 @@ node使用帮助：
 ```
   -host string
         proxy host 代理服务器地址 (default "127.0.0.1")    //指向server程序所在主机IP或域名
+  -password string
+        password (default "1e4d4e53556a1bb5f6adf4753e7956cb") //与uuid配对使用，用于连接认证
   -port int
         proxy port 代理端口 (default 925)
   -uuid string
@@ -56,9 +58,11 @@ server使用帮助:
   -host string
         listen host ip代理服务监听地址 (default "0.0.0.0")
   -listener value
-        listen&forward address list代理端监听转发地址，可多次传入该参数    //调用NewListener生成新的监听
+        listen&forward address list代理端监听转发地址，可多次传入该参数    //"本端在指定地址上监听并由对端转发至目的地"方式的地址信息
+  -password string
+        password (default "1e4d4e53556a1bb5f6adf4753e7956cb")              //与uuid配对使用，用于非配置文件管理的用户连接认证
   -peer_listener value
-        peer listen&forward address list内网代理转发地址，可多次传入该参数 //调用NewPeerListener通知对端在指定地址上监听
+        peer listen&forward address list内网代理转发地址，可多次传入该参数 //"对端在指定地址上监听并由本端转发至目的地"方式的地址信息
   -port int
         listen port代理服务监听端口 (default 925)
   -uuid string
@@ -68,6 +72,74 @@ server使用帮助:
 `-listener`参数示例：`-listener '{"Listen":{"Domain":"tcp","Addr":"127.0.0.1:1080"},"Forward":{"Domain":"tcp", "Addr":"127.0.0.1:80"}}'` 表示server在127.0.0.1:1080监听，数据转发至node端127.0.0.1:80
 
 `-peer_listener`参数示例:`-peer_listener '{"Listen":{"Domain":"tcp","Addr":"127.0.0.1:1022"},"Forward":{"Domain":"tcp", "Addr":"127.0.0.1:22"}}'` 表示node在127.0.0.0:1022监听，数据转发至server端127.0.0.1:22
+
+## 配置文件示例
+
+默认配置文件为/etc/goproxy.conf，通过该配置文件可以配置多个客户端认证和监听信息。
+
+配置文件为json格式，clients对象包含所有可用客户端对象数据，每个客户端对象数据由uuid/password/listen/peerListen组成，uuid用于标识客户端，password用于加密数据，listen存储代理方式为"服务端监听端口并由客户端转发至目的地"的地址信息，peerListen存储代理方式为"客户端监听端口并由服务端转发至目的地"的地址信息
+```json
+{
+    "clients":[
+        {
+            "uuid":"testclient1",
+            "password":"client1_password",
+            "listen":[
+                {
+                    "Listen":{
+                        "Domain":"tcp",
+                        "Addr":"0.0.0.0:8080"
+                    },
+                    "Forward":{
+                        "Domain":"tcp",
+                        "Addr":"127.0.0.1:80"
+                    }
+                }
+            ],
+            "peerListen":[
+                {
+                    "Listen":{
+                        "Domain":"tcp",
+                        "Addr":"0.0.0.0:8022"
+                    },
+                    "Forward":{
+                        "Domain":"tcp",
+                        "Addr":"127.0.0.1:22"
+                    }
+                }
+            ]
+        },
+        {
+            "uuid":"testclient2",
+            "password":"client2_password",
+            "listen":[
+                {
+                    "Listen":{
+                        "Domain":"tcp",
+                        "Addr":"0.0.0.0:8081"
+                    },
+                    "Forward":{
+                        "Domain":"tcp",
+                        "Addr":"127.0.0.1:80"
+                    }
+                }
+            ],
+            "peerListen":[
+                {
+                    "Listen":{
+                        "Domain":"tcp",
+                        "Addr":"0.0.0.0:8022"
+                    },
+                    "Forward":{
+                        "Domain":"tcp",
+                        "Addr":"127.0.0.1:22"
+                    }
+                }
+            ]
+        }
+    ]
+}
+```
 
 ## 应用示例
 
