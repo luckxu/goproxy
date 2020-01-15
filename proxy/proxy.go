@@ -28,6 +28,7 @@ type Proxy struct {
 	idx uint32
 	//当前代理的ID
 	ID  uint32
+	keepaliveAt int64
 	//主连接
 	c net.Conn
 	//缓存池
@@ -63,6 +64,7 @@ func NewProxy(id uint32, c net.Conn, ctx interface{}, aesBlock cipher.Block, bp 
 		panic("buffer pool can not be nil")
 	}
 	p := &Proxy{ID: id, idx: 1, aesBlock: aesBlock, c: c, bp: bp, exitCB: exit, Ctx: ctx}
+	p.keepaliveAt = time.Now().Unix()
 	p.sendChan = make(chan *buffer, 256)
 	p.emergencyChan = make(chan *buffer, 16)
 	p.ctrlChan = make(chan byte, 64)
@@ -266,6 +268,8 @@ func (p *Proxy) readProc(b *buffer) (bufferUsed bool) {
 		return
 	}
 	if cmd == PROXY_CMD_KEEPALIVE {
+		p.keepaliveAt = time.Now().Unix()
+		fmt.Printf("keepalive, id:%d, at:%s\n", p.ID, time.Now().String())
 		return
 	}
 	ok := false
@@ -502,6 +506,10 @@ func (p *Proxy) write() {
 				if tickms > 60000 {
 					tickms -= 60000
 					p.sendCommand(false, 0, PROXY_CMD_KEEPALIVE, nil, nil)
+				}
+
+				if time.Now().Unix() - p.keepaliveAt > 120 {
+					goto err
 				}
 			}
 		case b = <-p.emergencyChan:
