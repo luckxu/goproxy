@@ -171,16 +171,7 @@ func (p *Proxy) NewListener(msg []byte) {
 		fmt.Printf("json unmarshal error:%s.\n", err)
 		return
 	}
-	p.mutex.Lock()
-	for {
-		p.listenerIdx++
-		if _, ok := p.listeners[p.listenerIdx]; ok == true {
-			continue
-		}
-		break
-	}
-	id := p.listenerIdx
-	p.mutex.Unlock()
+	id := -1
 	go func() {
 		for {
 			for {
@@ -193,6 +184,14 @@ func (p *Proxy) NewListener(msg []byte) {
 				lsn.active = true
 				lsn.l = l
 				p.mutex.Lock()
+				for {
+					p.listenerIdx++
+					if _, ok := p.listeners[p.listenerIdx]; ok == true {
+						continue
+					}
+					break
+				}
+				id = p.listenerIdx
 				//删除已有句柄
 				if _, ok := p.listeners[id]; ok != true {
 					delete(p.listeners, id)
@@ -567,4 +566,17 @@ err:
 //发送或接受的包大小受buffer限制，大于buffer限制的包需要手动分包
 func (p *Proxy) Handle() {
 	p.write()
+}
+
+
+//主动退出函数
+//@c 主连接，用于承载服务器之间数据传输，需要完成必要的认证和aes128密钥分配
+//由读go程负责读取，读入数据都经aes128加密，需要解密后发送给子连接或监听子连接
+//由主连接发送的数据都需要aes128加密，子连接或监听子连接发送数据时通过sendChan传入主线程
+//发送或接受的包大小受buffer限制，大于buffer限制的包需要手动分包
+func (p *Proxy) Close() {
+	select {
+	case p.ctrlChan <- CTRL_CMD_EXIT:
+	default:
+	}
 }
