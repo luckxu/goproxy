@@ -13,7 +13,7 @@ all: clean $(APPS)
 
 $(BLDDIR)/%:%
 	@mkdir -p $(dir $@)
-	@cd ./apps/$* && go build
+	@cd ./apps/$* && go build --ldflags="-s -w"
 	@mv ./apps/$*/$* $@
 
 $(APPS): %: $(BLDDIR)/%

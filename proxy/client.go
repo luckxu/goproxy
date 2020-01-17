@@ -70,8 +70,8 @@ func (cli *client) read() {
 				goto err
 			}
 		}
-		//对端要求暂时停止数据读取
-		for cli.pause {
+		//主动限速
+		if cli.pause {
 			time.Sleep(time.Second / 10)
 		}
 		//超时定时器，用于产生CTRL_CMD_TICK，定时清理空闲缓存

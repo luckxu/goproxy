@@ -106,9 +106,8 @@ func (p *Proxy) encryptBuffer(b *buffer) {
 	b.size += int(padding)
 	b.data[2] = byte(b.size)
 	b.data[3] = byte(b.size >> 8)
-	p.aesBlock.Encrypt(b.data[0:aes.BlockSize], b.data[0:aes.BlockSize])
-	if b.size > aes.BlockSize {
-		p.aesBlock.Encrypt(b.data[aes.BlockSize:b.size], b.data[aes.BlockSize:b.size])
+	for i:= 0; i < b.size; i += 16 {
+		p.aesBlock.Encrypt(b.data[i:i+16], b.data[i:i+16])
 	}
 }
 
@@ -268,7 +267,6 @@ func (p *Proxy) readProc(b *buffer) (bufferUsed bool) {
 	}
 	if cmd == PROXY_CMD_KEEPALIVE {
 		p.keepaliveAt = time.Now().Unix()
-		fmt.Printf("keepalive, id:%d, at:%s\n", p.ID, time.Now().String())
 		return
 	}
 	ok := false
@@ -329,6 +327,7 @@ func (p *Proxy) read() {
 	var b *buffer
 	size := 0
 	flag := 0
+	last := time.Now().UnixNano()
 	for {
 		if b == nil {
 			b = p.getBuffer()
@@ -343,10 +342,19 @@ func (p *Proxy) read() {
 		n, err := p.c.Read(b.data[size:])
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				p.ctrlChan <- CTRL_CMD_TICK
+				now := time.Now().UnixNano()
+				if now - last > int64(TICK_MS) {
+					p.ctrlChan <- CTRL_CMD_TICK
+					last = now
+				}
 				continue
 			}
 			goto err
+		}
+		now := time.Now().UnixNano()
+		if now - last > int64(TICK_MS) {
+			p.ctrlChan <- CTRL_CMD_TICK
+			last = now
 		}
 		size += n
 		for {
@@ -371,8 +379,8 @@ func (p *Proxy) read() {
 				break
 			}
 			//解密剩余数据
-			if b.size > aes.BlockSize {
-				p.aesBlock.Decrypt(b.data[aes.BlockSize:b.size], b.data[aes.BlockSize:b.size])
+			for i:= aes.BlockSize; i < b.size; i += 16 {
+				p.aesBlock.Decrypt(b.data[i:i+16], b.data[i:i+16])
 			}
 			//数据量多于一个包，暂存在newB中
 			var newB *buffer = nil
