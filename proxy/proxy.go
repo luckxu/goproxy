@@ -424,13 +424,13 @@ err:
 //@cmd 发送命令， PROXY_CMD_XX
 //@b 待发达缓存，不为空则利用该缓存，nil则重新分配；
 //@body 待发送数据，不为空则将数据写入缓存数据区
-func (p *Proxy) sendCommand(subtype bool, id uint32, cmd byte, b *buffer, body []byte) {
+func (p *Proxy) buildCommand(subtype bool, id uint32, cmd byte, b *buffer, body []byte) *buffer{
 	//头部占用8字节
 	if b == nil {
 		b = p.getBuffer()
 		if b == nil {
 			fmt.Printf("allocate new buffer failed, exit.\n")
-			return
+			return nil
 		}
 		b.size = 8
 	}
@@ -451,6 +451,18 @@ func (p *Proxy) sendCommand(subtype bool, id uint32, cmd byte, b *buffer, body [
 	//data[2-3]为加密后数据大小，含头部
 	//data[1]低4位为aes128加密时补齐字节数
 	p.encryptBuffer(b)
+	return b
+}
+
+//数据组装并发送函数
+//@cmd 发送命令， PROXY_CMD_XX
+//@b 待发达缓存，不为空则利用该缓存，nil则重新分配；
+//@body 待发送数据，不为空则将数据写入缓存数据区
+func (p *Proxy) sendCommand(subtype bool, id uint32, cmd byte, b *buffer, body []byte) {
+	b = p.buildCommand(subtype, id, cmd, b, body)
+	if b == nil {
+		return
+	}
 	//尽快发送，如发送不及时，在此处阻塞
 	if cmd == PROXY_CMD_PAUSE || cmd == PROXY_CMD_RUN {
 		p.emergencyChan <- b
@@ -499,6 +511,8 @@ func (p *Proxy) write() {
 	tickms := 0
 	for {
 		select {
+		case b = <-p.emergencyChan:
+		case b = <-p.sendChan:
 		case cmd := <-p.ctrlChan:
 			switch cmd {
 			case CTRL_CMD_EXIT:
@@ -512,15 +526,13 @@ func (p *Proxy) write() {
 				tickms += (int(TICK_MS) / 1000000)
 				if tickms > 60000 {
 					tickms -= 60000
-					p.sendCommand(false, 0, PROXY_CMD_KEEPALIVE, nil, nil)
+					b = p.buildCommand(false, 0, PROXY_CMD_KEEPALIVE, nil, nil)
 				}
 
 				if time.Now().Unix() - p.keepaliveAt > 120 {
 					goto err
 				}
 			}
-		case b = <-p.emergencyChan:
-		case b = <-p.sendChan:
 		}
 		if b != nil {
 			if ok := p.writeBuffer(b); !ok {

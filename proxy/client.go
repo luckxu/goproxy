@@ -72,7 +72,7 @@ func (cli *client) read() {
 		}
 		//主动限速
 		if cli.pause {
-			time.Sleep(time.Second / 10)
+			time.Sleep(TICK_MS)
 		}
 		//超时定时器，用于产生CTRL_CMD_TICK，定时清理空闲缓存
 		_ = cli.c.SetReadDeadline(time.Now().Add(TICK_MS))
