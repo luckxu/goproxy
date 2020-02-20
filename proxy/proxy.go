@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	reuse "github.com/libp2p/go-reuseport"
+	"log"
 	"net"
 	"sync"
 	"time"
@@ -39,8 +40,6 @@ type Proxy struct {
 	emergencyChan chan *buffer
 	//控制通道，发送CTRL_CMD_XX命令
 	ctrlChan chan byte
-	//空闲缓存
-	freeBuffers *bufferHeader
 	//加密aes128密钥
 	aesBlock cipher.Block
 	//保护锁
@@ -52,9 +51,14 @@ type Proxy struct {
 	//监听索引和列表
 	listenerIdx int
 	listeners   map[int]*Listener
+	closedClient map[uint32]int64
 	//退出参数和回调函数
 	Ctx         interface{}
 	exitCB      callback
+}
+
+func init() {
+	log.SetFlags(log.LstdFlags | log.Lshortfile)
 }
 
 //NewProxy创建新的代理对象
@@ -68,28 +72,11 @@ func NewProxy(id uint32, c net.Conn, ctx interface{}, aesBlock cipher.Block, bp 
 	p.sendChan = make(chan *buffer, 256)
 	p.emergencyChan = make(chan *buffer, 16)
 	p.ctrlChan = make(chan byte, 64)
-	p.freeBuffers = p.newBufferHeader(128)
 	p.clients = make(map[uint32]*client)
 	p.subClients = make(map[uint32]*client)
 	p.listeners = make(map[int]*Listener)
+	p.closedClient = make(map[uint32] int64)
 	return p
-}
-
-//创建缓存头bufferHeader
-func (p *Proxy) newBufferHeader(holdcnt int) *bufferHeader {
-	return &bufferHeader{pool: p.bp, holdcnt:holdcnt}
-}
-
-//尝试从空闲缓存或缓存池中分配缓存
-func (p *Proxy) getBuffer() *buffer {
-	b := p.freeBuffers.pop()
-	if b == nil {
-		b = p.bp.get()
-		if b == nil {
-			fmt.Printf("alloc new buffer failed.\n")
-		}
-	}
-	return b
 }
 
 //aes128加密缓存，分两次加密，先加密头部，再加密数据区
@@ -116,8 +103,7 @@ func (p *Proxy) encryptBuffer(b *buffer) {
 func (p *Proxy) clientExit(cli *client) {
 	p.mutex.Lock()
 	defer p.mutex.Unlock()
-	p.bp.appendList(cli.sendBuffers)
-	p.bp.appendList(cli.freeBuffers)
+	cli.sendBuffers.free()
 	if cli.subtype {
 		delete(p.subClients, cli.id)
 	} else {
@@ -281,7 +267,8 @@ func (p *Proxy) readProc(b *buffer) (bufferUsed bool) {
 	}
 	//子连接命令，通过ID查找对应的连接句柄
 	subtype := (b.data[0] & 0x80) != 0
-	p.mutex.RLock()
+	p.mutex.Lock()
+	defer p.mutex.Unlock()
 	if subtype {
 		//对端监听子连接对应本端子连接
 		cli, ok = p.clients[id]
@@ -289,13 +276,15 @@ func (p *Proxy) readProc(b *buffer) (bufferUsed bool) {
 		//对端子连接对应本端监听子连接
 		cli, ok = p.subClients[id]
 	}
-	p.mutex.RUnlock()
 	//子连接命令或数据
 	if ok == false {
 		if cmd != PROXY_CMD_CLOSE_CONNECT {
-			fmt.Printf("unkown connection, type:%v, id:%d.\n", subtype, id)
-			p.sendCommand(!subtype, id, PROXY_CMD_CLOSE_CONNECT, b, nil)
-			bufferUsed = true
+			if _, ok := p.closedClient[id]; !ok {
+				fmt.Printf("unkown connection, type:%v, id:%d.\n", subtype, id)
+				p.sendCommand(!subtype, id, PROXY_CMD_CLOSE_CONNECT, b, nil)
+				p.closedClient[id] = time.Now().Unix()
+				bufferUsed = true
+			}
 		}
 		return
 	}
@@ -309,7 +298,10 @@ func (p *Proxy) readProc(b *buffer) (bufferUsed bool) {
 		cli.pause = false
 		return
 	case PROXY_CMD_CLOSE_CONNECT:
-		cli.ctrlChan <- CTRL_CMD_EXIT
+		select {
+		case cli.ctrlChan <- CTRL_CMD_EXIT:
+		default:
+		}
 	case PROXY_CMD_DATA:
 		//将缓存发送至子连接
 		//使用链表存储待发送数据而非通道
@@ -330,7 +322,7 @@ func (p *Proxy) read() {
 	last := time.Now().UnixNano()
 	for {
 		if b == nil {
-			b = p.getBuffer()
+			b = p.bp.get()
 			if b == nil {
 				goto err
 			}
@@ -338,12 +330,12 @@ func (p *Proxy) read() {
 			size = 0
 		}
 		//设置读超时并在超时时生成TICK信号用于清理空闲缓存
-		_ = p.c.SetReadDeadline(time.Now().Add(TICK_MS))
+		_ = p.c.SetReadDeadline(time.Now().Add(TICK))
 		n, err := p.c.Read(b.data[size:])
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				now := time.Now().UnixNano()
-				if now - last > int64(TICK_MS) {
+				if now - last > int64(TICK) {
 					p.ctrlChan <- CTRL_CMD_TICK
 					last = now
 				}
@@ -352,7 +344,7 @@ func (p *Proxy) read() {
 			goto err
 		}
 		now := time.Now().UnixNano()
-		if now - last > int64(TICK_MS) {
+		if now - last > int64(TICK) {
 			p.ctrlChan <- CTRL_CMD_TICK
 			last = now
 		}
@@ -386,7 +378,7 @@ func (p *Proxy) read() {
 			var newB *buffer = nil
 			if b.size < size {
 				//有多余数据，循环处理
-				newB = p.getBuffer()
+				newB = p.bp.get()
 				if newB == nil {
 					goto err
 				}
@@ -400,8 +392,7 @@ func (p *Proxy) read() {
 			b.size -= int(b.data[1] & 0x0f)
 			bufferUsed := p.readProc(b)
 			if !bufferUsed {
-				//放入空闲缓存列表
-				p.freeBuffers.append(b, true)
+				p.bp.put(b)
 			}
 			b = nil
 			//有多余数据，存放在newB
@@ -414,7 +405,7 @@ func (p *Proxy) read() {
 	}
 err:
 	if b != nil {
-		p.freeBuffers.push(b, true)
+		p.bp.put(b)
 	}
 	p.ctrlChan <- CTRL_CMD_EXIT
 	p.wg.Done()
@@ -427,7 +418,7 @@ err:
 func (p *Proxy) buildCommand(subtype bool, id uint32, cmd byte, b *buffer, body []byte) *buffer{
 	//头部占用8字节
 	if b == nil {
-		b = p.getBuffer()
+		b = p.bp.get()
 		if b == nil {
 			fmt.Printf("allocate new buffer failed, exit.\n")
 			return nil
@@ -480,7 +471,7 @@ func (p *Proxy) clientSendCommand(cli *client, cmd byte, b *buffer, body []byte)
 //@b 待写入缓存
 func (p *Proxy) writeBuffer(b *buffer) bool {
 	offset := 0
-	if b.size > DEFAULT_BUFFER_SIZE {
+	if b.size > cap(b.data) || b.size < aes.BlockSize || (b.size%aes.BlockSize) > 0 {
 		panic("buffer size error")
 	}
 	for {
@@ -496,7 +487,7 @@ func (p *Proxy) writeBuffer(b *buffer) bool {
 		continue
 	}
 	//释放缓存，如有必要，可以清理
-	p.freeBuffers.append(b, true)
+	p.bp.put(b)
 	return true
 }
 
@@ -518,24 +509,29 @@ func (p *Proxy) write() {
 			case CTRL_CMD_EXIT:
 				goto err
 			case CTRL_CMD_TICK:
-				//定时释放空闲内存， read go程超时产生定时器
-				if b := p.freeBuffers.pop(); b != nil {
-					p.bp.put(b)
-					b = nil
+				now := time.Now().Unix()
+				if now - p.keepaliveAt > 120 {
+					goto err
 				}
-				tickms += (int(TICK_MS) / 1000000)
+				tickms += int(TICK) / 1000000
+				if tickms > 1000 {
+					p.mutex.Lock()
+					for k, v := range p.closedClient {
+						if v + 1 < now {
+							delete(p.closedClient, k)
+						}
+					}
+					p.mutex.Unlock()
+				}
 				if tickms > 60000 {
 					tickms -= 60000
 					b = p.buildCommand(false, 0, PROXY_CMD_KEEPALIVE, nil, nil)
-				}
-
-				if time.Now().Unix() - p.keepaliveAt > 120 {
-					goto err
 				}
 			}
 		}
 		if b != nil {
 			if ok := p.writeBuffer(b); !ok {
+				p.bp.put(b)
 				goto err
 			}
 			b = nil
@@ -564,7 +560,6 @@ err:
 	}
 	p.mutex.Unlock()
 	p.wg.Wait()
-	p.bp.appendList(p.freeBuffers)
 	finish := false
 	for !finish {
 		select {

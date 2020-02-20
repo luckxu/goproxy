@@ -34,7 +34,7 @@ const (
 )
 
 const (
-	TICK_MS = time.Second / 10
+	TICK = time.Second
 )
 
 type Address struct {

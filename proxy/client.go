@@ -32,8 +32,6 @@ type client struct {
 	exitChan chan byte
 	//发送缓存列表
 	sendBuffers *bufferHeader
-	//接收缓存列表
-	freeBuffers *bufferHeader
 	wg          sync.WaitGroup
 }
 
@@ -44,18 +42,8 @@ func NewClient(id uint32, c net.Conn, proxy *Proxy, subtype bool) *client {
 	cli.ctrlChan = make(chan byte, 256)
 	cli.exitChan = make(chan byte, 16)
 	//发送缓存数大于16即会向对端发送暂停命令
-	cli.sendBuffers = proxy.newBufferHeader(32)
-	cli.freeBuffers = proxy.newBufferHeader(32)
+	cli.sendBuffers = newBufferHeader(32, proxy.bp)
 	return cli
-}
-
-//尝试从本地空闲缓存或代理缓存池中分配缓存
-func (cli *client) getBuffer() *buffer {
-	b := cli.freeBuffers.pop()
-	if b == nil {
-		b = cli.proxy.getBuffer()
-	}
-	return b
 }
 
 //读取数据go程，除超时外任何错误都关闭连接
@@ -64,7 +52,7 @@ func (cli *client) read() {
 	var b *buffer = nil
 	for {
 		if b == nil {
-			b = cli.getBuffer()
+			b = cli.proxy.bp.get()
 			if b == nil {
 				fmt.Println("allocate new buffer failed, exit")
 				goto err
@@ -72,15 +60,14 @@ func (cli *client) read() {
 		}
 		//主动限速
 		if cli.pause {
-			time.Sleep(TICK_MS)
+			time.Sleep(time.Second / 20)
 		}
 		//超时定时器，用于产生CTRL_CMD_TICK，定时清理空闲缓存
-		_ = cli.c.SetReadDeadline(time.Now().Add(TICK_MS))
+		_ = cli.c.SetReadDeadline(time.Now().Add(TICK))
 		//前8字节为头部，预留
 		n, err := cli.c.Read(b.data[8:])
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() == true {
-				cli.ctrlChan <- CTRL_CMD_TICK
 				continue
 			}
 			goto err
@@ -141,22 +128,25 @@ func (cli *client) write() {
 					cli.sendPause = false
 				}
 				//归还至空闲缓存池，如果池中缓存长时间未使用，会在定时器中归还至根缓存池
-				cli.freeBuffers.append(b, true)
+				cli.proxy.bp.put(b)
 			case CTRL_CMD_FORCE_EXIT:
 				forceExit = true
 				goto err
-			case CTRL_CMD_TICK:
-				//由读read函数超时产生定时事件，清理空闲内存
-				b := cli.freeBuffers.pop()
-				if b != nil {
-					cli.proxy.bp.put(b)
-				}
 			}
 		}
 	}
 err:
 	cli.c.Close()
 	cli.wg.Wait()
+	clean:
+	for {
+		select {
+		case <-cli.exitChan:
+		case <-cli.ctrlChan:
+		default:
+			break clean
+		}
+	}
 	if forceExit == false {
 		//非强制关闭时发送连接已关闭消息
 		cli.proxy.clientSendCommand(cli, PROXY_CMD_CLOSE_CONNECT, nil, nil)
